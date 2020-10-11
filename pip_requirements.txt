@@ -1,0 +1,17 @@
+setuptools
+pyOpenSSL
+cchardet
+epdb
+protobuf
+html5lib
+keyring
+lxml
+ordereddict
+paramiko
+simplejson
+PyYAML
+requests_ntlm
+requests
+beautifulsoup4
+boto3
+configparser
