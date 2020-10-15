@@ -17,6 +17,8 @@ import base64
 import os
 import configparser
 from botocore.config import Config
+if sys.platform == 'win32':
+    from requests_negotiate_sspi import HttpNegotiateAuth
 
 parser = argparse.ArgumentParser(prog='samlapi_formauth2', description='Obtain AWS credentials using ADFS Saml assertion and store into shared credential file. Python 3 version.',formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 parser.add_argument('--version', action='version', version='%(prog)s 2.0')
@@ -36,6 +38,7 @@ parser.add_argument("-e", "--set-env-vars", dest="setenvvars", default=False, ac
 parser.add_argument("-d", "--store-as-default", dest="storeasdefault", default=False, action="store_true", help="store AWS credential also as DEFAULT profile")
 parser.add_argument("-i", "--silent", dest="silent", default=False, action="store_true", help="Supress all inputs. If parameters not provided script will fail")
 parser.add_argument("-v", "--verbose", dest="verbose", default=False, action="store_true", help="enable verbose mode")
+parser.add_argument("-w", "--sso", dest="sso", default=False, action="store_true", help="SSO Windows Integrated Authentication. (Only Windows)")
 args = parser.parse_args()
 
 print("Starting ADFS SAML process...")
@@ -63,6 +66,12 @@ log.info(">> no ssl verification: [%s]", args.nosslverification)
 log.info(">> force: [%s]", args.force)
 log.info(">> set env vars: [%s]", args.setenvvars)
 log.info(">> store as default: [%s]", args.storeasdefault)
+
+# turn off sso if run on linux
+if sys.platform == 'win32':
+    sso = args.sso
+else:
+    sso = False
 
 ##########################################################################
 # Variables
@@ -103,40 +112,47 @@ if 'USERDOMAIN' in os.environ:
 else:
     currentuser  =  getpass.getuser()
 
-# Get the federated credentials from the user
-if username in (None, '') or not username.strip():
-    print("Input your CORP domain credentials:")
-    if not args.silent:
-        username = input("Username [{0}]: ".format(currentuser))
-    else:
-        log.warning('silent mode enforced, skiping username input...')
-    if username in (None, '') or not username.strip():
-        username = currentuser.strip()
-
-if password in (None, '') or not password.strip():
-    if not args.silent:
-        password = getpass.getpass("Password for [{0}]:".format(username))
-    else:
-        log.warning('silent mode enforced, skiping password input...')
-
-if username in (None, '') or not username.strip():
-    log.error('empty username. it must be provided...')
-    quit_message()
-    sys.exit(1)
-
-log.info("Using username: [{0}]".format(username))
-
 # Initiate session handler
 session = requests.Session()
 
-payload = {}
-payload['username']=username
-payload['password']=password
-payload['authentication']='FormsAuthentication'
+if not sso:
+    # Get the federated credentials from the user
+    if username in (None, '') or not username.strip():
+        print("Input your domain credentials (username@domain):")
+        if not args.silent:
+            username = input("Username [{0}]: ".format(currentuser))
+        else:
+            log.warning('silent mode enforced, skiping username input...')
+        if username in (None, '') or not username.strip():
+            username = currentuser.strip()
 
-# Programmatically get the SAML assertion
-log.info("Calling ADFS endpoint [{0}]".format(args.idpentryurl))
-response = session.post(args.idpentryurl, data=payload, verify=not args.nosslverification)
+    if password in (None, '') or not password.strip():
+        if not args.silent:
+            password = getpass.getpass("Password for [{0}]:".format(username))
+        else:
+            log.warning('silent mode enforced, skiping password input...')
+
+    if username in (None, '') or not username.strip():
+        log.error('empty username. it must be provided...')
+        quit_message()
+        sys.exit(1)
+
+    payload = {}
+    payload['username']=username
+    payload['password']=password
+    payload['authentication']='FormsAuthentication'
+
+    log.info("Calling ADFS endpoint [{0}]".format(args.idpentryurl))
+    log.info("Using username: [{0}]".format(username))
+    response = session.post(args.idpentryurl, data=payload, verify=not args.nosslverification)
+else:
+    username = currentuser
+    headers = {'user-agent': 'chrome'}
+    log.info("Using SSO to call ADFS endpoint [{0}]".format(args.idpentryurl))
+    print("SSO Username: [{0}]".format(username))
+    response = session.post(args.idpentryurl, headers=headers, auth=HttpNegotiateAuth(), verify=not args.nosslverification)
+
+
 
 # Debug the parameter payload if needed
 # Use with caution since this will print sensitive output to the screen
@@ -184,7 +200,7 @@ if (samlresponseencoded == ''):
 
 # Parse the returned assertion and extract the authorized roles
 awsroles = []
-samlsessionduration = '0'
+samlsessionduration = 28800
 samlrolesessionname = 'not available'
 samlresponse = ET.fromstring(base64.b64decode(samlresponseencoded))
 for saml2attribute in samlresponse.iter('{urn:oasis:names:tc:SAML:2.0:assertion}Attribute'):
@@ -227,7 +243,7 @@ if not(rolearn in (None, '') or not rolearn.strip()):
 
 if args.silent:
     if selectedroleindex == -1:
-        log.error('Silent mode enforced. No Role Arn hasbeen provided nor selected')
+        log.error('Silent mode enforced. No Role Arn has been provided nor selected')
         quit_message()
         sys.exit(1)
 else:
@@ -272,9 +288,9 @@ try:
     log.info('...done')
 except:
     e = sys.exc_info()
-    log.warning("Could not assume role [{0}]".format(selectedrolearn))
-    for x in range(len(e)):
-        log.warning(">>> {0}".format(e[x]))
+    log.warning("Asuming role [{0}] with session duration [{1}] failed...".format(selectedrolearn, samlsessionduration))
+    #for x in range(len(e)):
+    #    log.warning(">>> {0}".format(e[x]))
     downgrade = True
 
 # if previous call failed then try to call again with downgraded session duration
